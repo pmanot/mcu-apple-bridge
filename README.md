@@ -1,6 +1,6 @@
-# ESP32-S3 USB NCM Server
+# Apple <> ESP32 Interop
 
-USB CDC-NCM (Network Control Model) implementation for ESP32-S3 that creates an Ethernet-over-USB connection with iPhone and macOS. No host drivers required.
+USB CDC-NCM (Network Control Model) implementation for ESP32-S3 that creates an Ethernet-over-USB connection with iOS and macOS. No host drivers required.
 
 ## Motivation
 
@@ -16,17 +16,14 @@ USB CDC-NCM provides a direct, low-latency network connection over USB-C using t
 - ESP32-S3 enumerates as a class-compliant USB Ethernet adapter
 - DHCP server assigns IP addresses to connected hosts (192.168.7.x)
 - HTTP server at 192.168.7.1 for application communication
-- Works on iOS 17+ and macOS without installing drivers
+- Works on iOS 17+ and macOS 11+ without installing drivers
 - Maintains host WiFi/cellular connectivity (does not hijack default route)
 
 ## Hardware
 
-- ESP32-S3 with USB-OTG support
+- ESP32-S3 with USB-OTG support 
+  - USB-OTG support is crucial, ESP32-C3 will not work
 - USB-C cable (data-capable)
-
-Pin mapping (directly to USB connector on most dev boards):
-- D+ = GPIO20
-- D- = GPIO19
 
 ## Build and Flash
 
@@ -45,6 +42,8 @@ idf.py flash
 1. Connect ESP32-S3 to iPhone/Mac via USB-C
 2. Wait for DHCP lease (~2 seconds)
 3. Access `http://192.168.7.1/` from browser or app
+
+**IMPORTANT: Make sure to reconnect/reset the board after flashing to ensure the device can be discovered as an ethernet adapter!**
 
 ### HTTP Endpoints
 
@@ -79,7 +78,7 @@ Data flow:
 iPhone/Mac <--USB NCM--> ESP32 lwIP stack <--> HTTP server
 ```
 
-## Common Issues
+## Troubleshoooting Guide
 
 ### Interface appears but no IP address
 
