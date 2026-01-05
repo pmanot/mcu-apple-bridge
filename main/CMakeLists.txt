@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "usb_ncm_server.c"
+        "network_setup.c"
+        "http_server.c"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        nvs_flash
+        esp_netif
+        esp_event
+        esp_http_server
+)

@@ -1,0 +1,13 @@
+# USB NCM (Network Control Model) mode
+CONFIG_TINYUSB_NET_MODE_NCM=y
+
+# NCM buffer configuration for reliable transfers
+CONFIG_TINYUSB_NCM_OUT_NTB_BUFFS_COUNT=3
+CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT=3
+
+# LWIP configuration
+CONFIG_LWIP_IP4_FRAG=y
+CONFIG_LWIP_IP6_FRAG=y
+
+# Increase DHCP server lease count if needed
+CONFIG_LWIP_DHCPS_MAX_STATION_NUM=8
