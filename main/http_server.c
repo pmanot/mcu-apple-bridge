@@ -1,6 +1,18 @@
 /*
  * HTTP Server Implementation
  * Simple HTTP server for USB NCM connectivity test
+ *
+ * This server runs on lwIP's TCP stack at 192.168.7.1:80
+ * It provides:
+ *   - Status page (GET /)
+ *   - LED control (GET/POST /led, /led/on, /led/off)
+ *   - Device reset (POST /reset)
+ *
+ * The esp_http_server component handles:
+ *   - TCP connection management
+ *   - HTTP parsing (headers, body)
+ *   - URI routing
+ *   - Response generation
  */
 
 #include <string.h>
@@ -18,11 +30,14 @@
 #define LED_OFF 1    // Active-low: drive HIGH to turn off
 static bool s_led_state = false;
 
-static const char *TAG = "http_server";
+static const char *TAG = "http";
 
 static httpd_handle_t s_server = NULL;
 
-// Simple HTML response
+// Request counter for logging
+static uint32_t s_request_count = 0;
+
+// Simple HTML response with inline styles
 static const char *HTML_RESPONSE =
     "<!DOCTYPE html>"
     "<html>"
@@ -49,14 +64,52 @@ static const char *HTML_RESPONSE =
     "</html>";
 
 /**
+ * @brief Log HTTP request details
+ */
+static void log_request(httpd_req_t *req, const char *handler_name)
+{
+    s_request_count++;
+
+    // Get client info if available
+    int sockfd = httpd_req_to_sockfd(req);
+
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "┌─ HTTP REQUEST #%lu ─────────────────────",
+             (unsigned long)s_request_count);
+    ESP_LOGI(TAG, "│ Method:  %s", http_method_str(req->method));
+    ESP_LOGI(TAG, "│ URI:     %s", req->uri);
+    ESP_LOGI(TAG, "│ Handler: %s", handler_name);
+    ESP_LOGI(TAG, "│ Socket:  %d", sockfd);
+    ESP_LOGI(TAG, "│ Content: %d bytes", req->content_len);
+}
+
+/**
+ * @brief Log HTTP response
+ */
+static void log_response(int status_code, const char *content_type, size_t body_len)
+{
+    ESP_LOGI(TAG, "│");
+    ESP_LOGI(TAG, "│ Response: %d", status_code);
+    ESP_LOGI(TAG, "│ Type:     %s", content_type);
+    ESP_LOGI(TAG, "│ Size:     %zu bytes", body_len);
+    ESP_LOGI(TAG, "└────────────────────────────────────────");
+    ESP_LOGI(TAG, "");
+}
+
+/**
  * @brief Handler for GET /
+ *
+ * Serves the main status page. This is the first thing users see
+ * when they connect and open http://192.168.7.1/ in their browser.
  */
 static esp_err_t root_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "Serving root page to %s", req->uri);
+    log_request(req, "root_handler");
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, HTML_RESPONSE, strlen(HTML_RESPONSE));
+
+    log_response(200, "text/html", strlen(HTML_RESPONSE));
 
     return ESP_OK;
 }
@@ -69,18 +122,29 @@ static const httpd_uri_t root_uri = {
 };
 
 /**
- * @brief Handler for POST /reset - triggers ESP32 software reset
- * Call this from your iOS app if connection becomes stale after replug
+ * @brief Handler for POST /reset
+ *
+ * Triggers a software reset of the ESP32. Useful if the USB
+ * connection becomes stale after unplug/replug cycles.
  */
 static esp_err_t reset_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "Reset requested - restarting ESP32");
+    log_request(req, "reset_handler");
+
+    ESP_LOGW(TAG, "│");
+    ESP_LOGW(TAG, "│ !!! RESET REQUESTED !!!");
+    ESP_LOGW(TAG, "│ Device will restart in 100ms");
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"status\":\"resetting\"}");
+    const char *response = "{\"status\":\"resetting\"}";
+    httpd_resp_sendstr(req, response);
+
+    log_response(200, "application/json", strlen(response));
 
     // Small delay to let response send before reset
     vTaskDelay(pdMS_TO_TICKS(100));
+
+    ESP_LOGI(TAG, "Calling esp_restart()...");
     esp_restart();
 
     return ESP_OK;  // Never reached
@@ -94,44 +158,71 @@ static const httpd_uri_t reset_uri = {
 };
 
 /**
- * @brief Handler for POST /led/on - turn LED on
+ * @brief Handler for POST /led/on
+ *
+ * Turns the LED on (GPIO 21, active-low).
  */
 static esp_err_t led_on_handler(httpd_req_t *req)
 {
+    log_request(req, "led_on_handler");
+
     s_led_state = true;
     gpio_set_level(LED_GPIO, LED_ON);
-    ESP_LOGI(TAG, "LED ON");
+
+    ESP_LOGI(TAG, "│");
+    ESP_LOGI(TAG, "│ LED STATE: ON (GPIO %d = LOW)", LED_GPIO);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"led\":true}");
+    const char *response = "{\"led\":true}";
+    httpd_resp_sendstr(req, response);
+
+    log_response(200, "application/json", strlen(response));
+
     return ESP_OK;
 }
 
 /**
- * @brief Handler for POST /led/off - turn LED off
+ * @brief Handler for POST /led/off
+ *
+ * Turns the LED off (GPIO 21, active-low).
  */
 static esp_err_t led_off_handler(httpd_req_t *req)
 {
+    log_request(req, "led_off_handler");
+
     s_led_state = false;
     gpio_set_level(LED_GPIO, LED_OFF);
-    ESP_LOGI(TAG, "LED OFF");
+
+    ESP_LOGI(TAG, "│");
+    ESP_LOGI(TAG, "│ LED STATE: OFF (GPIO %d = HIGH)", LED_GPIO);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"led\":false}");
+    const char *response = "{\"led\":false}";
+    httpd_resp_sendstr(req, response);
+
+    log_response(200, "application/json", strlen(response));
+
     return ESP_OK;
 }
 
 /**
- * @brief Handler for GET /led - get LED state
+ * @brief Handler for GET /led
+ *
+ * Returns current LED state as JSON.
  */
 static esp_err_t led_status_handler(httpd_req_t *req)
 {
+    log_request(req, "led_status_handler");
+
+    ESP_LOGI(TAG, "│");
+    ESP_LOGI(TAG, "│ Current LED state: %s", s_led_state ? "ON" : "OFF");
+
     httpd_resp_set_type(req, "application/json");
-    if (s_led_state) {
-        httpd_resp_sendstr(req, "{\"led\":true}");
-    } else {
-        httpd_resp_sendstr(req, "{\"led\":false}");
-    }
+    const char *response = s_led_state ? "{\"led\":true}" : "{\"led\":false}";
+    httpd_resp_sendstr(req, response);
+
+    log_response(200, "application/json", strlen(response));
+
     return ESP_OK;
 }
 
@@ -156,50 +247,88 @@ static const httpd_uri_t led_status_uri = {
     .user_ctx  = NULL
 };
 
+/**
+ * @brief Start the HTTP server
+ *
+ * Creates the HTTP server on port 80 and registers all URI handlers.
+ * The server uses esp_http_server which is built on lwIP's TCP stack.
+ */
 esp_err_t http_server_start(void)
 {
     if (s_server != NULL) {
-        ESP_LOGW(TAG, "HTTP server already running");
+        ESP_LOGW(TAG, "HTTP server already running, skipping init");
         return ESP_OK;
     }
+
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "Starting HTTP server...");
 
     // Initialize LED GPIO
     gpio_reset_pin(LED_GPIO);
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(LED_GPIO, LED_OFF);  // Start with LED off (HIGH for active-low)
-    ESP_LOGI(TAG, "LED GPIO %d initialized", LED_GPIO);
+    gpio_set_level(LED_GPIO, LED_OFF);  // Start with LED off
+    ESP_LOGI(TAG, "  LED GPIO %d initialized (active-low)", LED_GPIO);
 
+    // Configure HTTP server
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.lru_purge_enable = true;
+    config.lru_purge_enable = true;  // Close stale connections
+    config.server_port = 80;
 
-    ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
+    ESP_LOGI(TAG, "  Port: %d", config.server_port);
+    ESP_LOGI(TAG, "  Max URI handlers: %d", config.max_uri_handlers);
+    ESP_LOGI(TAG, "  Max connections: %d", config.max_open_sockets);
+    ESP_LOGI(TAG, "  LRU purge: enabled");
 
+    // Start the server
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "  FAILED to start server: %s", esp_err_to_name(ret));
         return ret;
     }
 
     // Register URI handlers
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "Registering URI handlers:");
+    ESP_LOGI(TAG, "  GET  /          -> root_handler (status page)");
     httpd_register_uri_handler(s_server, &root_uri);
-    httpd_register_uri_handler(s_server, &reset_uri);
-    httpd_register_uri_handler(s_server, &led_on_uri);
-    httpd_register_uri_handler(s_server, &led_off_uri);
+
+    ESP_LOGI(TAG, "  GET  /led       -> led_status_handler (get state)");
     httpd_register_uri_handler(s_server, &led_status_uri);
 
+    ESP_LOGI(TAG, "  POST /led/on    -> led_on_handler");
+    httpd_register_uri_handler(s_server, &led_on_uri);
+
+    ESP_LOGI(TAG, "  POST /led/off   -> led_off_handler");
+    httpd_register_uri_handler(s_server, &led_off_uri);
+
+    ESP_LOGI(TAG, "  POST /reset     -> reset_handler (restart device)");
+    httpd_register_uri_handler(s_server, &reset_uri);
+
+    ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "HTTP server started at http://192.168.7.1/");
+    ESP_LOGI(TAG, "");
 
     return ESP_OK;
 }
 
+/**
+ * @brief Stop the HTTP server
+ */
 esp_err_t http_server_stop(void)
 {
     if (s_server == NULL) {
         return ESP_OK;
     }
 
+    ESP_LOGI(TAG, "Stopping HTTP server...");
     esp_err_t ret = httpd_stop(s_server);
     s_server = NULL;
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP server stopped");
+    } else {
+        ESP_LOGE(TAG, "Failed to stop HTTP server: %s", esp_err_to_name(ret));
+    }
 
     return ret;
 }

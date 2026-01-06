@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(idf.py build:*)",
+      "Bash(source:*)"
+    ]
+  },
+  "outputStyle": "default"
+}
