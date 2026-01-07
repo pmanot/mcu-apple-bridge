@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(idf.py build:*)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Bash(idf.py add-dependency:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)"
     ]
   },
   "outputStyle": "default"

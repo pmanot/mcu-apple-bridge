@@ -3,6 +3,9 @@ idf_component_register(
         "usb_ncm_server.c"
         "network_setup.c"
         "http_server.c"
+        "log_stream.c"
+        "wifi_setup.c"
+        "event_log.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
@@ -10,4 +13,7 @@ idf_component_register(
         esp_netif
         esp_event
         esp_http_server
+        esp_wifi
+        mdns
+        esp_timer
 )

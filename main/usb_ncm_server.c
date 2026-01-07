@@ -35,6 +35,9 @@
 
 #include "network_setup.h"
 #include "http_server.h"
+#include "log_stream.h"
+#include "wifi_setup.h"
+#include "event_log.h"
 
 static const char *TAG = "main";
 
@@ -60,7 +63,10 @@ static int cdc_log_vprintf(const char *fmt, va_list args)
             buf[len-1] = '\n';  // Ensure newline
         }
 
-        // Only send if USB CDC is connected (terminal open)
+        // Add to log buffer for SSE streaming
+        log_buffer_add(buf, len);
+
+        // Only send to USB CDC if connected (terminal open)
         if (tud_cdc_connected()) {
             tinyusb_cdcacm_write_queue(TINYUSB_CDC_ACM_0, (uint8_t *)buf, len);
             tinyusb_cdcacm_write_flush(TINYUSB_CDC_ACM_0, 0);
@@ -93,6 +99,10 @@ static void print_system_info(void)
 
 void app_main(void)
 {
+    // Initialize log buffers first (before any logging)
+    log_buffer_init();
+    event_log_init();
+
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "╔═══════════════════════════════════════╗");
     ESP_LOGI(TAG, "║   USB NCM Server for ESP32-S3         ║");
@@ -108,7 +118,7 @@ void app_main(void)
     // require it (WiFi, BLE, etc.). We init it even though we don't
     // use WiFi, in case any dependency needs it.
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[BOOT 1/6] Initializing NVS flash...");
+    ESP_LOGI(TAG, "[BOOT 1/7] Initializing NVS flash...");
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -125,7 +135,7 @@ void app_main(void)
     // lwIP (lightweight IP) is the TCP/IP stack used by ESP-IDF.
     // This initializes the stack but doesn't create any interfaces yet.
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[BOOT 2/6] Initializing TCP/IP stack (lwIP)...");
+    ESP_LOGI(TAG, "[BOOT 2/7] Initializing TCP/IP stack (lwIP)...");
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_LOGI(TAG, "           lwIP stack ready");
 
@@ -135,7 +145,7 @@ void app_main(void)
     // The event loop handles async events (network up/down, IP assigned, etc.)
     // Many ESP-IDF components post events here.
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[BOOT 3/6] Creating event loop...");
+    ESP_LOGI(TAG, "[BOOT 3/7] Creating event loop...");
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_LOGI(TAG, "           Event loop ready");
 
@@ -145,27 +155,37 @@ void app_main(void)
     // This is the main initialization - sets up USB, NCM, esp-netif, DHCP.
     // See network_setup.c for detailed logging of each sub-step.
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[BOOT 4/6] Initializing USB NCM network...");
+    ESP_LOGI(TAG, "[BOOT 4/7] Initializing USB NCM network...");
     ESP_ERROR_CHECK(network_init());
 
     // =========================================================================
-    // STEP 5: Redirect logging to USB CDC
+    // STEP 5: Initialize WiFi (independent debug channel)
+    // =========================================================================
+    // WiFi provides an independent path for log streaming when USB NCM fails.
+    // Both USB NCM and WiFi serve the same HTTP endpoints.
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "[BOOT 5/7] Initializing WiFi...");
+    ESP_ERROR_CHECK(wifi_init_sta());
+
+    // =========================================================================
+    // STEP 6: Redirect logging to USB CDC
     // =========================================================================
     // After this point, all ESP_LOG output goes to the USB CDC serial port
     // instead of the default UART. Connect a terminal to see logs.
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[BOOT 5/6] Redirecting logs to USB CDC-ACM...");
+    ESP_LOGI(TAG, "[BOOT 6/7] Redirecting logs to USB CDC-ACM...");
     esp_log_set_vprintf(cdc_log_vprintf);
     ESP_LOGI(TAG, "           Logs now output to /dev/cu.usbmodem* (macOS)");
     ESP_LOGI(TAG, "           Use: screen /dev/cu.usbmodem* 115200");
 
     // =========================================================================
-    // STEP 6: Start HTTP server
+    // STEP 7: Start HTTP server
     // =========================================================================
-    // The HTTP server listens on port 80 at 192.168.7.1
-    // It serves a simple status page and LED control endpoints.
+    // The HTTP server listens on port 80 on both:
+    //   - USB NCM: 192.168.7.1
+    //   - WiFi: <dhcp-assigned-ip>
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[BOOT 6/6] Starting HTTP server...");
+    ESP_LOGI(TAG, "[BOOT 7/7] Starting HTTP server...");
     ESP_ERROR_CHECK(http_server_start());
 
     // =========================================================================
@@ -176,10 +196,9 @@ void app_main(void)
     ESP_LOGI(TAG, "║   BOOT COMPLETE - SERVER READY        ║");
     ESP_LOGI(TAG, "╚═══════════════════════════════════════╝");
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "How to connect:");
-    ESP_LOGI(TAG, "  1. Connect USB-C cable to iPhone/Mac");
-    ESP_LOGI(TAG, "  2. Wait for DHCP (automatic)");
-    ESP_LOGI(TAG, "  3. Open http://192.168.7.1/ in browser");
+    ESP_LOGI(TAG, "Connection options:");
+    ESP_LOGI(TAG, "  USB NCM: http://192.168.7.1/");
+    ESP_LOGI(TAG, "  WiFi:    http://%s/ (see above for IP)", wifi_get_ip_str());
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "Available endpoints:");
     ESP_LOGI(TAG, "  GET  /          - Status page");
@@ -187,8 +206,9 @@ void app_main(void)
     ESP_LOGI(TAG, "  POST /led/on    - Turn LED on");
     ESP_LOGI(TAG, "  POST /led/off   - Turn LED off");
     ESP_LOGI(TAG, "  POST /reset     - Restart ESP32");
+    ESP_LOGI(TAG, "  GET  /logs      - SSE log stream (real-time)");
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Serial monitor:");
+    ESP_LOGI(TAG, "Serial monitor (USB CDC):");
     ESP_LOGI(TAG, "  macOS: screen /dev/cu.usbmodem* 115200");
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());

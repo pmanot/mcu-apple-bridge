@@ -24,6 +24,8 @@
 #include "driver/gpio.h"
 
 #include "http_server.h"
+#include "log_stream.h"
+#include "event_log.h"
 
 #define LED_GPIO 21  // Built-in LED (same as LED_BUILTIN in Arduino)
 #define LED_ON  0    // Active-low: drive LOW to turn on
@@ -74,13 +76,13 @@ static void log_request(httpd_req_t *req, const char *handler_name)
     int sockfd = httpd_req_to_sockfd(req);
 
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "┌─ HTTP REQUEST #%lu ─────────────────────",
+    ESP_LOGI(TAG, "+-- HTTP REQUEST #%lu --------------------",
              (unsigned long)s_request_count);
-    ESP_LOGI(TAG, "│ Method:  %s", http_method_str(req->method));
-    ESP_LOGI(TAG, "│ URI:     %s", req->uri);
-    ESP_LOGI(TAG, "│ Handler: %s", handler_name);
-    ESP_LOGI(TAG, "│ Socket:  %d", sockfd);
-    ESP_LOGI(TAG, "│ Content: %d bytes", req->content_len);
+    ESP_LOGI(TAG, "| Method:  %s", http_method_str(req->method));
+    ESP_LOGI(TAG, "| URI:     %s", req->uri);
+    ESP_LOGI(TAG, "| Handler: %s", handler_name);
+    ESP_LOGI(TAG, "| Socket:  %d", sockfd);
+    ESP_LOGI(TAG, "| Content: %d bytes", req->content_len);
 }
 
 /**
@@ -88,11 +90,11 @@ static void log_request(httpd_req_t *req, const char *handler_name)
  */
 static void log_response(int status_code, const char *content_type, size_t body_len)
 {
-    ESP_LOGI(TAG, "│");
-    ESP_LOGI(TAG, "│ Response: %d", status_code);
-    ESP_LOGI(TAG, "│ Type:     %s", content_type);
-    ESP_LOGI(TAG, "│ Size:     %zu bytes", body_len);
-    ESP_LOGI(TAG, "└────────────────────────────────────────");
+    ESP_LOGI(TAG, "|");
+    ESP_LOGI(TAG, "| Response: %d", status_code);
+    ESP_LOGI(TAG, "| Type:     %s", content_type);
+    ESP_LOGI(TAG, "| Size:     %zu bytes", body_len);
+    ESP_LOGI(TAG, "+----------------------------------------");
     ESP_LOGI(TAG, "");
 }
 
@@ -131,9 +133,9 @@ static esp_err_t reset_handler(httpd_req_t *req)
 {
     log_request(req, "reset_handler");
 
-    ESP_LOGW(TAG, "│");
-    ESP_LOGW(TAG, "│ !!! RESET REQUESTED !!!");
-    ESP_LOGW(TAG, "│ Device will restart in 100ms");
+    ESP_LOGW(TAG, "|");
+    ESP_LOGW(TAG, "| !!! RESET REQUESTED !!!");
+    ESP_LOGW(TAG, "| Device will restart in 100ms");
 
     httpd_resp_set_type(req, "application/json");
     const char *response = "{\"status\":\"resetting\"}";
@@ -169,8 +171,8 @@ static esp_err_t led_on_handler(httpd_req_t *req)
     s_led_state = true;
     gpio_set_level(LED_GPIO, LED_ON);
 
-    ESP_LOGI(TAG, "│");
-    ESP_LOGI(TAG, "│ LED STATE: ON (GPIO %d = LOW)", LED_GPIO);
+    ESP_LOGI(TAG, "|");
+    ESP_LOGI(TAG, "| LED STATE: ON (GPIO %d = LOW)", LED_GPIO);
 
     httpd_resp_set_type(req, "application/json");
     const char *response = "{\"led\":true}";
@@ -193,8 +195,8 @@ static esp_err_t led_off_handler(httpd_req_t *req)
     s_led_state = false;
     gpio_set_level(LED_GPIO, LED_OFF);
 
-    ESP_LOGI(TAG, "│");
-    ESP_LOGI(TAG, "│ LED STATE: OFF (GPIO %d = HIGH)", LED_GPIO);
+    ESP_LOGI(TAG, "|");
+    ESP_LOGI(TAG, "| LED STATE: OFF (GPIO %d = HIGH)", LED_GPIO);
 
     httpd_resp_set_type(req, "application/json");
     const char *response = "{\"led\":false}";
@@ -214,8 +216,8 @@ static esp_err_t led_status_handler(httpd_req_t *req)
 {
     log_request(req, "led_status_handler");
 
-    ESP_LOGI(TAG, "│");
-    ESP_LOGI(TAG, "│ Current LED state: %s", s_led_state ? "ON" : "OFF");
+    ESP_LOGI(TAG, "|");
+    ESP_LOGI(TAG, "| Current LED state: %s", s_led_state ? "ON" : "OFF");
 
     httpd_resp_set_type(req, "application/json");
     const char *response = s_led_state ? "{\"led\":true}" : "{\"led\":false}";
@@ -248,6 +250,221 @@ static const httpd_uri_t led_status_uri = {
 };
 
 /**
+ * @brief Handler for GET /logs - Server-Sent Events log stream
+ *
+ * Streams logs in real-time using SSE format:
+ *   data: log line here\n\n
+ *
+ * iOS Usage with URLSession:
+ *   let url = URL(string: "http://192.168.7.1/logs")!
+ *   let task = URLSession.shared.dataTask(with: url) { data, _, _ in
+ *       if let data = data, let line = String(data: data, encoding: .utf8) {
+ *           // Parse SSE: lines starting with "data: "
+ *       }
+ *   }
+ *   task.resume()
+ *
+ * Or use a proper EventSource library for Swift.
+ */
+static esp_err_t logs_sse_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "+-- SSE LOG STREAM STARTED -------------");
+    ESP_LOGI(TAG, "| Client connected for log streaming");
+
+    // Allocate a reader slot
+    int reader_id = log_buffer_alloc_reader();
+    if (reader_id < 0) {
+        ESP_LOGW(TAG, "| No reader slots available (max 4 clients)");
+        ESP_LOGI(TAG, "+----------------------------------------");
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "Too many log clients (max 4)");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "| Allocated reader ID: %d", reader_id);
+    ESP_LOGI(TAG, "+----------------------------------------");
+
+    // Set SSE headers
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "keep-alive");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    // Send initial comment to establish connection
+    const char *init_msg = ": ESP32 log stream connected\n\n";
+    if (httpd_resp_send_chunk(req, init_msg, strlen(init_msg)) != ESP_OK) {
+        log_buffer_free_reader(reader_id);
+        return ESP_FAIL;
+    }
+
+    // Stream logs until client disconnects
+    char sse_buf[300];  // "data: " + log line + "\n\n"
+    int idle_count = 0;
+    const int MAX_IDLE = 100;  // Send keepalive after this many empty polls
+
+    while (1) {
+        size_t log_len;
+        const char *log_line = log_buffer_read(reader_id, &log_len);
+
+        if (log_line && log_len > 0) {
+            idle_count = 0;
+
+            // Format as SSE: "data: <log>\n\n"
+            int sse_len = snprintf(sse_buf, sizeof(sse_buf), "data: %.*s\n\n",
+                                   (int)log_len, log_line);
+
+            if (httpd_resp_send_chunk(req, sse_buf, sse_len) != ESP_OK) {
+                // Client disconnected
+                break;
+            }
+        } else {
+            idle_count++;
+
+            // Send keepalive comment periodically to detect disconnect
+            if (idle_count >= MAX_IDLE) {
+                idle_count = 0;
+                if (httpd_resp_send_chunk(req, ": keepalive\n\n", 13) != ESP_OK) {
+                    break;
+                }
+            }
+
+            // Small delay when no data
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+
+    // Cleanup
+    log_buffer_free_reader(reader_id);
+
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "+-- SSE LOG STREAM ENDED ---------------");
+    ESP_LOGI(TAG, "| Reader %d disconnected", reader_id);
+    ESP_LOGI(TAG, "+----------------------------------------");
+
+    // End chunked response
+    httpd_resp_send_chunk(req, NULL, 0);
+
+    return ESP_OK;
+}
+
+static const httpd_uri_t logs_sse_uri = {
+    .uri       = "/logs",
+    .method    = HTTP_GET,
+    .handler   = logs_sse_handler,
+    .user_ctx  = NULL
+};
+
+/**
+ * @brief Handler for GET /logs_all - Static log dump
+ *
+ * Returns all buffered logs as plain text (not SSE).
+ * Useful for viewing logs from before connecting to the stream.
+ */
+static esp_err_t logs_all_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "+-- LOGS_ALL REQUEST -------------------");
+
+    int line_count = log_buffer_get_count();
+    ESP_LOGI(TAG, "| Returning %d buffered log lines", line_count);
+
+    // Allocate buffer for all logs (100 lines * 256 bytes max = 25KB)
+    #define LOG_DUMP_SIZE 32768
+    char *chunk = malloc(LOG_DUMP_SIZE);
+    if (!chunk) {
+        ESP_LOGE(TAG, "| malloc failed for log buffer");
+        ESP_LOGI(TAG, "+----------------------------------------");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+
+    // Get all logs
+    size_t total_len = log_buffer_get_all(chunk, LOG_DUMP_SIZE);
+
+    if (total_len > 0) {
+        httpd_resp_send(req, chunk, total_len);
+    } else {
+        const char *empty_msg = "(no logs in buffer)\n";
+        httpd_resp_send(req, empty_msg, strlen(empty_msg));
+    }
+
+    ESP_LOGI(TAG, "| Sent %zu bytes", total_len);
+    ESP_LOGI(TAG, "+----------------------------------------");
+
+    free(chunk);
+    return ESP_OK;
+}
+
+static const httpd_uri_t logs_all_uri = {
+    .uri       = "/logs_all",
+    .method    = HTTP_GET,
+    .handler   = logs_all_handler,
+    .user_ctx  = NULL
+};
+
+/**
+ * @brief Handler for GET /events - Critical events (sticky, never truncated)
+ */
+static esp_err_t events_handler(httpd_req_t *req)
+{
+    #define EVENTS_BUF_SIZE 4096
+    char *buf = malloc(EVENTS_BUF_SIZE);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+
+    size_t len = event_log_get_all(buf, EVENTS_BUF_SIZE);
+    httpd_resp_send(req, buf, len);
+
+    free(buf);
+    return ESP_OK;
+}
+
+static const httpd_uri_t events_uri = {
+    .uri       = "/events",
+    .method    = HTTP_GET,
+    .handler   = events_handler,
+    .user_ctx  = NULL
+};
+
+/**
+ * @brief Handler for GET /status - JSON with event flags
+ */
+static esp_err_t status_handler(httpd_req_t *req)
+{
+    #define STATUS_BUF_SIZE 1024
+    char *buf = malloc(STATUS_BUF_SIZE);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+
+    size_t len = event_log_get_status_json(buf, STATUS_BUF_SIZE);
+    httpd_resp_send(req, buf, len);
+
+    free(buf);
+    return ESP_OK;
+}
+
+static const httpd_uri_t status_uri = {
+    .uri       = "/status",
+    .method    = HTTP_GET,
+    .handler   = status_handler,
+    .user_ctx  = NULL
+};
+
+/**
  * @brief Start the HTTP server
  *
  * Creates the HTTP server on port 80 and registers all URI handlers.
@@ -273,6 +490,7 @@ esp_err_t http_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;  // Close stale connections
     config.server_port = 80;
+    config.max_uri_handlers = 12;    // We have 9 handlers, leave room for more
 
     ESP_LOGI(TAG, "  Port: %d", config.server_port);
     ESP_LOGI(TAG, "  Max URI handlers: %d", config.max_uri_handlers);
@@ -303,6 +521,18 @@ esp_err_t http_server_start(void)
 
     ESP_LOGI(TAG, "  POST /reset     -> reset_handler (restart device)");
     httpd_register_uri_handler(s_server, &reset_uri);
+
+    ESP_LOGI(TAG, "  GET  /logs      -> logs_sse_handler (SSE log stream)");
+    httpd_register_uri_handler(s_server, &logs_sse_uri);
+
+    ESP_LOGI(TAG, "  GET  /logs_all  -> logs_all_handler (all buffered logs)");
+    httpd_register_uri_handler(s_server, &logs_all_uri);
+
+    ESP_LOGI(TAG, "  GET  /events    -> events_handler (critical events)");
+    httpd_register_uri_handler(s_server, &events_uri);
+
+    ESP_LOGI(TAG, "  GET  /status    -> status_handler (event flags JSON)");
+    httpd_register_uri_handler(s_server, &status_uri);
 
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "HTTP server started at http://192.168.7.1/");
