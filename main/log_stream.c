@@ -15,7 +15,7 @@
 #include "freertos/semphr.h"
 
 // Configuration
-#define LOG_BUFFER_LINES    100     // Number of log lines to buffer
+#define LOG_BUFFER_LINES    200     // Number of log lines to buffer (increased for boot replay)
 #define LOG_LINE_MAX_LEN    256     // Max length per line
 #define MAX_READERS         4       // Max concurrent SSE clients
 
@@ -84,8 +84,12 @@ int log_buffer_alloc_reader(void)
         for (int i = 0; i < MAX_READERS; i++) {
             if (!s_reader_active[i]) {
                 s_reader_active[i] = true;
-                // Start reader at current position (don't replay old logs)
-                s_reader_pos[i] = s_total_written;
+                // Start reader at OLDEST available log to replay from boot
+                if (s_total_written <= LOG_BUFFER_LINES) {
+                    s_reader_pos[i] = 0;  // Buffer hasn't wrapped yet
+                } else {
+                    s_reader_pos[i] = s_total_written - LOG_BUFFER_LINES;  // Start at oldest
+                }
                 reader_id = i;
                 break;
             }

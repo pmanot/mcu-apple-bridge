@@ -369,8 +369,8 @@ static esp_err_t logs_all_handler(httpd_req_t *req)
     int line_count = log_buffer_get_count();
     ESP_LOGI(TAG, "| Returning %d buffered log lines", line_count);
 
-    // Allocate buffer for all logs (100 lines * 256 bytes max = 25KB)
-    #define LOG_DUMP_SIZE 32768
+    // Allocate buffer for all logs (200 lines * 256 bytes max = 51KB)
+    #define LOG_DUMP_SIZE 65536
     char *chunk = malloc(LOG_DUMP_SIZE);
     if (!chunk) {
         ESP_LOGE(TAG, "| malloc failed for log buffer");
